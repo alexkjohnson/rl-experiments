@@ -19,10 +19,10 @@ def train_ppo(**kwargs):
     logger_kwargs = kwargs['logger_kwargs']
 
     config = {
-    key: value
-    for key, value in kwargs.items()
-    if key not in ('logger_kwargs', 'env_fn')
-}
+        key: value
+        for key, value in kwargs.items()
+        if key not in ('logger_kwargs', 'env_fn')
+    }
 
     # Copy the nested dictionary so the PPO arguments remain unchanged.
     if 'ac_kwargs' in config:
@@ -78,7 +78,7 @@ def main():
     eg = ExperimentGrid(name=f'ppo-{args.param}')
 
     # Keep the environment and network architecture fixed.
-    eg.add('env_name', 'CartPole-v1', '', True)
+    eg.add('env_name', 'Pendulum-v1', '', True)
     eg.add('ac_kwargs:hidden_sizes', (64, 64), 'hid')
     eg.add('ac_kwargs:activation', torch.nn.Tanh, '')
 
