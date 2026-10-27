@@ -55,7 +55,8 @@ def main():
 
     parser.add_argument(
         '--param',
-        choices=['clip_ratio', 'train_pi_iters', 'target_kl', 'pi_lr'],
+        choices=['clip_ratio', 'train_pi_iters', 'target_kl', 'pi_lr',
+            'normalize_advantages', 'anneal_lr'],
         default='clip_ratio',
     )
     parser.add_argument('--num_seeds', type=int, default=5)
@@ -73,6 +74,8 @@ def main():
         'train_pi_iters': [20, 40, 80],
         'target_kl': [0.005, 0.01, 0.02],
         'pi_lr': [1e-4, 3e-4, 1e-3],
+        'normalize_advantages': [True, False],
+        'anneal_lr': [True, False],
     }
 
     eg = ExperimentGrid(name=f'ppo-{args.param}')
