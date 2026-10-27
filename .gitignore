@@ -1,6 +1,7 @@
 # Experiment outputs: logs, configs and model checkpoints
 ppo/results/
 td3/results/
+sac/results/
 wandb/
 
 # Python
