@@ -2,6 +2,8 @@
 ppo/results/
 td3/results/
 sac/results/
+benchmarks/results/
+benchmarks/plots/
 wandb/
 
 # Python

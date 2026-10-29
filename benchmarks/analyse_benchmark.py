@@ -17,9 +17,16 @@ def main():
     for progress_file in RESULTS_DIR.rglob("progress.txt"):
         # Example: sac-benchmark_pendulum-v1
         experiment_name = progress_file.parent.parent.name
-        algo = experiment_name.split("-")[0].lower()
 
-        if algo not in ALGORITHMS:
+        if experiment_name.startswith("ppo-benchmark-hid64-32"):
+            algo = "PPO-64x32"
+        elif experiment_name.startswith("ppo-benchmark"):
+            algo = "PPO-64x64"
+        elif experiment_name.startswith("sac-benchmark"):
+            algo = "SAC"
+        elif experiment_name.startswith("td3-benchmark"):
+            algo = "TD3"
+        else:
             continue
 
         try:
@@ -28,7 +35,7 @@ def main():
             print(f"Skipping unreadable file {progress_file}: {exc}")
             continue
 
-        metric = "AverageEpRet"
+        metric = "AverageTestEpRet"
 
         if "Epoch" not in df.columns or metric not in df.columns:
             print(f"Skipping {progress_file}: missing Epoch or {metric}")
@@ -56,11 +63,8 @@ def main():
 
     # Report the number of distinct runs found for each algorithm.
     print("\nRuns found:")
-    run_counts = (
-        data.groupby("algo")["seed_run"]
-        .nunique()
-        .reindex([algo.upper() for algo in ALGORITHMS], fill_value=0)
-    )
+    run_counts = data.groupby("algo")["seed_run"].nunique()
+
     print(run_counts.rename("number_of_runs").to_string())
 
     # Aggregate returns across seeds at each epoch.
@@ -70,7 +74,7 @@ def main():
         .reset_index()
     )
 
-    print("\nFinal AverageEpRet by algorithm:")
+    print("\nFinal AverageTestEpRet by algorithm:")
     for algo, group in summary.groupby("algo", sort=True):
         last_epoch = group["Epoch"].max()
         final = group[group["Epoch"] == last_epoch].iloc[0]
@@ -98,7 +102,7 @@ def main():
         ax.fill_between(x, mean - std, mean + std, alpha=0.15)
 
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Average training episode return")
+    ax.set_ylabel("Average test episode return")
     ax.set_title("PPO vs SAC vs TD3 — Pendulum-v1")
     ax.legend(title="Algorithm")
     ax.grid(True, alpha=0.3)
