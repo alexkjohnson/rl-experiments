@@ -24,8 +24,9 @@ class Args:
     num_envs: int = 4
 
     # Training configuration
-    total_timesteps: int = 10_000
+    total_timesteps: int = 500_000
     learning_rate: float = 2.5e-4
+    anneal_lr: bool = True
     num_steps: int = 128
 
     # PPO hyperparameters
@@ -133,6 +134,12 @@ if __name__ == "__main__":
 
     # Training loop.
     for iteration in range(1, args.num_iterations + 1):
+        # Anneal the learning rate linearly if instructed to do so.
+        if args.anneal_lr:
+            frac = 1.0 - (iteration - 1.0) / args.num_iterations
+            lrnow = frac * args.learning_rate
+            optimizer.param_groups[0]["lr"] = lrnow
+
         # Collect one rollout.
         for step in range(args.num_steps):
             global_step += args.num_envs
@@ -315,5 +322,3 @@ if __name__ == "__main__":
             wandb.log(metrics, step=global_step)
 
     envs.close()
-    if args.track:
-        wandb.finish()
