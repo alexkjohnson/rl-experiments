@@ -37,6 +37,7 @@ class Args:
     gae_lambda: float = 0.95
     num_minibatches: int = 4
     update_epochs: int = 4
+    norm_adv: bool = True
     clip_coef: float = 0.2
     clip_vloss: bool = True
     ent_coef: float = 0.0
@@ -101,7 +102,7 @@ if __name__ == "__main__":
     args.num_iterations = args.total_timesteps // args.batch_size
 
     run_name = (f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}")
-    
+
     # Initialise Weights & Biases if tracking is enabled.
     if args.track:
         import wandb
@@ -175,7 +176,7 @@ if __name__ == "__main__":
             next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
             next_done = np.logical_or(terminated, truncated)
             rewards[step] = torch.as_tensor(reward, dtype=torch.float32, device=device)
-            next_obs, next_done = torch.as_tensor(next_obs, dtype=torch.float32, device=device), torch.as_tensor(next_done, dtype=torch.float32, device=device)
+            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
             # Log completed episodes.
             if "final_info" in infos and "episode" in infos["final_info"]:
@@ -220,14 +221,10 @@ if __name__ == "__main__":
         b_values = values.reshape(-1)
 
         # Optimise the policy and value networks.
-        approx_kls = []
-        clipfracs = []
-        pg_losses = []
-        v_losses = []
-        entropy_losses = []
-        stop_update = False
-
         b_inds = np.arange(args.batch_size)
+        clipfracs = []
+        stop_update = False
+        pg_loss = v_loss = entropy_loss = None
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
             for start in range(0, args.batch_size, args.minibatch_size):
@@ -244,7 +241,6 @@ if __name__ == "__main__":
                 with torch.no_grad():
                     approx_kl = ((ratio - 1) - logratio).mean()
                     clipfrac = ((ratio - 1.0).abs() > args.clip_coef).float().mean()
-                approx_kls.append(approx_kl.item())
                 clipfracs.append(clipfrac.item())
 
                 if args.target_kl is not None and approx_kl > args.target_kl:
@@ -253,7 +249,8 @@ if __name__ == "__main__":
 
                 # Normalize advantages.
                 mb_advantages = b_advantages[mb_inds]
-                mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                if args.norm_adv:
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
 
                 # Calculate the clipped policy loss.
                 pg_loss1 = -mb_advantages * ratio
@@ -277,10 +274,6 @@ if __name__ == "__main__":
                 # Calculate the entropy bonus.
                 entropy_loss = entropy.mean()
 
-                pg_losses.append(pg_loss.item())
-                v_losses.append(v_loss.item())
-                entropy_losses.append(entropy_loss.item())
-
                 # Combine the losses.
                 loss = pg_loss - args.ent_coef * entropy_loss + args.vf_coef * v_loss
 
@@ -293,37 +286,35 @@ if __name__ == "__main__":
                 break
 
         # Calculate explained variance.
-        y_pred = b_values.cpu().numpy()
-        y_true = b_returns.cpu().numpy()
+        y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
-        explained_var = (
-            np.nan if var_y == 0
-            else 1 - np.var(y_true - y_pred) / var_y
-        )
+        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        mean_approx_kl = np.mean(approx_kls)
         mean_clipfrac = np.mean(clipfracs)
 
         # Report training progress.
         print(
             f"iteration={iteration}/{args.num_iterations}, "
             f"global_step={global_step}, "
-            f"approx_kl={mean_approx_kl:.5f}, "
+            f"approx_kl={approx_kl.item():.5f}, "
             f"clipfrac={mean_clipfrac:.3f}, "
         )
 
         # Log metrics to Weights & Biases.
         if args.track:
             metrics = {
-                "charts/approx_kl": mean_approx_kl,
+                "charts/approx_kl": approx_kl.item(),
                 "charts/clipfrac": mean_clipfrac,
                 "charts/explained_variance": explained_var,
                 "charts/SPS": int(global_step / (time.time() - start_time)),
-                "losses/policy_loss": np.mean(pg_losses),
-                "losses/value_loss": np.mean(v_losses),
-                "losses/entropy": np.mean(entropy_losses),
                 "charts/learning_rate": optimizer.param_groups[0]["lr"],
             }
+            if pg_loss is not None:
+                metrics.update({
+                    "losses/policy_loss": pg_loss.item(),
+                    "losses/value_loss": v_loss.item(),
+                    "losses/entropy": entropy_loss.item(),
+                })
             wandb.log(metrics, step=global_step)
 
     envs.close()
