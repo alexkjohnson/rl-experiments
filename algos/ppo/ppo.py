@@ -15,9 +15,12 @@ class Args:
     # Experiment configuration
     exp_name: str = "ppo"
     seed: int = 1
+    torch_deterministic: bool = True
+    cuda: bool = True
     track: bool = False
     wandb_project_name: str = "rlfw"
     wandb_entity: str | None = None
+    capture_video: bool = False
 
     # Environment configuration
     env_id: str = "CartPole-v1"
@@ -40,6 +43,19 @@ class Args:
     vf_coef: float = 0.5
     target_kl: float | None = 0.01
     max_grad_norm: float = 0.5
+
+
+def make_env(env_id, idx, capture_video, run_name):
+    def thunk():
+        if capture_video and idx == 0:
+            env = gym.make(env_id, render_mode="rgb_array")
+            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        else:
+            env = gym.make(env_id)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        return env
+
+    return thunk
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -101,10 +117,13 @@ if __name__ == "__main__":
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = args.torch_deterministic
+
+    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
     envs = gym.vector.SyncVectorEnv(
-        [lambda: gym.make(args.env_id) for _ in range(args.num_envs)],
+        [make_env(args.env_id, i, args.capture_video, run_name) for i in range(args.num_envs)],
         autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
@@ -112,25 +131,22 @@ if __name__ == "__main__":
     obs_dim = envs.single_observation_space.shape[0]
     action_dim = envs.single_action_space.n
 
-    agent = Agent(obs_dim, action_dim)
+    agent = Agent(obs_dim, action_dim).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # Storage setup
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape)
-    actions = torch.zeros((args.num_steps, args.num_envs), dtype=torch.long)
-    logprobs = torch.zeros((args.num_steps, args.num_envs))
-    rewards = torch.zeros((args.num_steps, args.num_envs))
-    dones = torch.zeros((args.num_steps, args.num_envs))
-    values = torch.zeros((args.num_steps, args.num_envs))
-
-    next_obs, _ = envs.reset(seed=args.seed)
-    next_obs = torch.as_tensor(next_obs, dtype=torch.float32)
-    next_done = torch.zeros(args.num_envs)
-    episode_returns = np.zeros(args.num_envs)
-    episode_lengths = np.zeros(args.num_envs)
+    obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
+    actions = torch.zeros((args.num_steps, args.num_envs), dtype=torch.long).to(device)
+    logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
+    values = torch.zeros((args.num_steps, args.num_envs)).to(device)
 
     global_step = 0
     start_time = time.time()
+    next_obs, _ = envs.reset(seed=args.seed)
+    next_obs = torch.as_tensor(next_obs, dtype=torch.float32, device=device)
+    next_done = torch.zeros(args.num_envs, device=device)
 
     # Training loop.
     for iteration in range(1, args.num_iterations + 1):
@@ -151,44 +167,33 @@ if __name__ == "__main__":
             # Select actions and calculate their log probabilities and values.
             with torch.no_grad():
                 action, logprob, _, value = agent.get_action_and_value(next_obs)
-
-            # Store the policy outputs.
+                values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
-            values[step] = value.squeeze(-1)
 
-            # Step all environments.
-            next_obs_np, reward_np, terminated_np, truncated_np, infos = envs.step(action.cpu().numpy())
+            # Step all environments and log data.
+            next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
+            next_done = np.logical_or(terminated, truncated)
+            rewards[step] = torch.as_tensor(reward, dtype=torch.float32, device=device)
+            next_obs, next_done = torch.as_tensor(next_obs, dtype=torch.float32, device=device), torch.as_tensor(next_done, dtype=torch.float32, device=device)
 
-            # Track episode statistics.
-            episode_returns += reward_np
-            episode_lengths += 1
-            for idx in np.flatnonzero(terminated_np | truncated_np):
-                print(
-                    f"global_step={global_step}, "
-                    f"env={idx}, "
-                    f"episodic_return={episode_returns[idx]:.1f}, "
-                    f"episodic_length={episode_lengths[idx]}"
-                )
-                episode_returns[idx], episode_lengths[idx] = 0, 0
-
-            # Convert rewards into a tensor.
-            reward = torch.as_tensor(reward_np, dtype=torch.float32)
+            # Log completed episodes.
+            if "final_info" in infos and "episode" in infos["final_info"]:
+                episode = infos["final_info"]["episode"]
+                for idx in np.flatnonzero(infos["_final_info"]):
+                    print(f"global_step={global_step}, episodic_return={episode['r'][idx]}")
+                    if args.track:
+                        wandb.log({
+                            "charts/episodic_return": episode["r"][idx],
+                            "charts/episodic_length": episode["l"][idx],
+                        }, step=global_step)
 
             # Bootstrap from the final observation when an episode is truncated.
-            for idx in np.flatnonzero(truncated_np):
-                final_obs = torch.as_tensor(infos["final_obs"][idx], dtype=torch.float32)
-
+            for idx in np.flatnonzero(truncated):
+                final_obs = torch.as_tensor(infos["final_obs"][idx], dtype=torch.float32, device=device)
                 with torch.no_grad():
                     final_value = agent.critic(final_obs).squeeze(-1)
-
-                reward[idx] += args.gamma * final_value
-
-            rewards[step] = reward
-
-            # Update the current observation and episode-ending flags.
-            next_obs = torch.as_tensor(next_obs_np, dtype=torch.float32)
-            next_done = torch.as_tensor(np.logical_or(terminated_np, truncated_np), dtype=torch.float32)
+                rewards[step, idx] += args.gamma * final_value
 
         # Calculate advantages and returns.
         with torch.no_grad():
