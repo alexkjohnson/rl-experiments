@@ -90,6 +90,9 @@ class Agent(nn.Module):
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, action_dim))
 
+    def get_value(self, x):
+        return self.critic(x)
+
     def get_action_and_value(self, obs, action=None):
         action_mean = self.actor_mean(obs)
         action_logstd = self.actor_logstd.expand_as(action_mean)
@@ -202,12 +205,12 @@ if __name__ == "__main__":
             for idx in np.flatnonzero(truncated):
                 final_obs = torch.as_tensor(infos["final_obs"][idx], dtype=torch.float32, device=device)
                 with torch.no_grad():
-                    final_value = agent.critic(final_obs).squeeze(-1)
+                    final_value = agent.get_value(final_obs).squeeze(-1)
                 rewards[step, idx] += args.gamma * final_value
 
         # Calculate advantages and returns.
         with torch.no_grad():
-            next_value = agent.critic(next_obs).squeeze(-1)
+            next_value = agent.get_value(next_obs).squeeze(-1)
             advantages = torch.zeros_like(rewards)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):

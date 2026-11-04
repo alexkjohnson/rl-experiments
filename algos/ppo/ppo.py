@@ -66,22 +66,25 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class Agent(nn.Module):
-    def __init__(self, obs_dim, action_dim):
+    def __init__(self, envs):
         super().__init__()
         self.actor = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 64)),
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 64)),
             nn.Tanh(),
-            layer_init(nn.Linear(64, action_dim), std=0.01)
+            layer_init(nn.Linear(64, envs.single_action_space.n), std=0.01)
         )
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 64)),
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 64)),
             nn.Tanh(),
             layer_init(nn.Linear(64, 1), std=1.0)
         )
+
+    def get_value(self, x):
+        return self.critic(x)
 
     def get_action_and_value(self, obs, action=None):
         logits = self.actor(obs)
@@ -129,10 +132,7 @@ if __name__ == "__main__":
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    obs_dim = envs.single_observation_space.shape[0]
-    action_dim = envs.single_action_space.n
-
-    agent = Agent(obs_dim, action_dim).to(device)
+    agent = Agent(envs).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # Storage setup
@@ -193,12 +193,12 @@ if __name__ == "__main__":
             for idx in np.flatnonzero(truncated):
                 final_obs = torch.as_tensor(infos["final_obs"][idx], dtype=torch.float32, device=device)
                 with torch.no_grad():
-                    final_value = agent.critic(final_obs).squeeze(-1)
+                    final_value = agent.get_value(final_obs).squeeze(-1)
                 rewards[step, idx] += args.gamma * final_value
 
         # Calculate advantages and returns.
         with torch.no_grad():
-            next_value = agent.critic(next_obs).squeeze(-1)
+            next_value = agent.get_value(next_obs).squeeze(-1)
             advantages = torch.zeros_like(rewards)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
