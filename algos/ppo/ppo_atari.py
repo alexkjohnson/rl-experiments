@@ -9,11 +9,19 @@ import torch.nn as nn
 import tyro
 from torch.distributions.categorical import Categorical
 
+from stable_baselines3.common.atari_wrappers import (
+    ClipRewardEnv,
+    EpisodicLifeEnv,
+    FireResetEnv,
+    MaxAndSkipEnv,
+    NoopResetEnv,
+)
+
 
 @dataclass
 class Args:
     # Experiment configuration
-    exp_name: str = "ppo"
+    exp_name: str = "ppo_atari"
     seed: int = 1
     torch_deterministic: bool = True
     cuda: bool = True
@@ -23,11 +31,11 @@ class Args:
     capture_video: bool = False
 
     # Environment configuration
-    env_id: str = "CartPole-v1"
-    num_envs: int = 4
+    env_id: str = "BreakoutNoFrameskip-v4"
+    num_envs: int = 8
 
     # Training configuration
-    total_timesteps: int = 500_000
+    total_timesteps: int = 10000000
     learning_rate: float = 2.5e-4
     anneal_lr: bool = True
     num_steps: int = 128
@@ -38,9 +46,9 @@ class Args:
     num_minibatches: int = 4
     update_epochs: int = 4
     norm_adv: bool = True
-    clip_coef: float = 0.2
+    clip_coef: float = 0.1
     clip_vloss: bool = True
-    ent_coef: float = 0.0
+    ent_coef: float = 0.01
     vf_coef: float = 0.5
     target_kl: float | None = 0.01
     max_grad_norm: float = 0.5
@@ -54,6 +62,15 @@ def make_env(env_id, idx, capture_video, run_name):
         else:
             env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
+        env = NoopResetEnv(env, noop_max=30)
+        env = MaxAndSkipEnv(env, skip=4)
+        env = EpisodicLifeEnv(env)
+        if "FIRE" in env.unwrapped.get_action_meanings():
+            env = FireResetEnv(env)
+        env = ClipRewardEnv(env)
+        env = gym.wrappers.ResizeObservation(env, (84, 84))
+        env = gym.wrappers.GrayscaleObservation(env)
+        env = gym.wrappers.FrameStackObservation(env, 4)
         return env
 
     return thunk
@@ -66,31 +83,34 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class Agent(nn.Module):
-    def __init__(self, obs_dim, action_dim):
+    def __init__(self, envs):
         super().__init__()
-        self.actor = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, action_dim), std=0.01)
+        self.network = nn.Sequential(
+            layer_init(nn.Conv2d(4, 32, 8, stride=4)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(32, 64, 4, stride=2)),
+            nn.ReLU(),
+            layer_init(nn.Conv2d(64, 64, 3, stride=1)),
+            nn.ReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(64 * 7 * 7, 512)),
+            nn.ReLU(),
         )
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0)
-        )
+        self.actor = layer_init(nn.Linear(512, envs.single_action_space.n), std=0.01)
+        self.critic = layer_init(nn.Linear(512, 1), std=1)
+
+    def get_value(self, obs):
+        return self.critic(self.network(obs / 255.0))
 
     def get_action_and_value(self, obs, action=None):
-        logits = self.actor(obs)
+        hidden = self.network(obs / 255.0)
+        logits = self.actor(hidden)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
         log_prob = probs.log_prob(action)
         entropy = probs.entropy()
-        value = self.critic(obs)
+        value = self.critic(hidden)
         return action, log_prob, entropy, value
 
 
@@ -129,10 +149,7 @@ if __name__ == "__main__":
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
-    obs_dim = envs.single_observation_space.shape[0]
-    action_dim = envs.single_action_space.n
-
-    agent = Agent(obs_dim, action_dim).to(device)
+    agent = Agent(envs).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # Storage setup
@@ -193,12 +210,12 @@ if __name__ == "__main__":
             for idx in np.flatnonzero(truncated):
                 final_obs = torch.as_tensor(infos["final_obs"][idx], dtype=torch.float32, device=device)
                 with torch.no_grad():
-                    final_value = agent.critic(final_obs).squeeze(-1)
+                    final_value = agent.get_value(final_obs).squeeze(-1)
                 rewards[step, idx] += args.gamma * final_value
 
         # Calculate advantages and returns.
         with torch.no_grad():
-            next_value = agent.critic(next_obs).squeeze(-1)
+            next_value = agent.get_value(next_obs).squeeze(-1)
             advantages = torch.zeros_like(rewards)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
